@@ -158,6 +158,34 @@ static reg_t reg_from_bytes(size_t len, const uint8_t* bytes)
   return res;
 }
 
+// ---- co-simulation memory capture (ADR-0013 D17/D18) ----------------------
+// Both helpers record into the same per-instruction buffers that the
+// --log-commits printer consumes, so the text log and the structured step
+// record stay one source of truth.  They are called from every site that
+// actually touches memory, including the aligned+TLB-hit fast paths in mmu.h,
+// which used to bypass the log entirely.  Record-only: no access, translation
+// or fault behaviour changes, and they cost one bool test when not logging.
+void mmu_t::cosim_log_load(reg_t vaddr, reg_t paddr, size_t len)
+{
+  if (!proc || unlikely(!proc->get_log_commits_enabled()))
+    return;
+  proc->state.log_mem_read.push_back(std::make_tuple(vaddr, paddr, (uint64_t)0, (uint8_t)len));
+}
+
+void mmu_t::cosim_log_store(reg_t vaddr, reg_t paddr, size_t len, const uint8_t* bytes)
+{
+  if (!proc || unlikely(!proc->get_log_commits_enabled()))
+    return;
+  // Spike's store log is fragmented to at most one register word per entry;
+  // keep that shape so the text log is byte-for-byte what it was before.
+  for (size_t offset = 0; offset < len; offset += sizeof(reg_t)) {
+    auto this_size = std::min(len - offset, sizeof(reg_t));
+    auto this_data = reg_from_bytes(this_size, bytes + offset);
+    proc->state.log_mem_write.push_back(
+        std::make_tuple(vaddr + offset, paddr + offset, this_data, (uint8_t)this_size));
+  }
+}
+
 bool mmu_t::mmio_fetch(reg_t paddr, size_t len, uint8_t* bytes)
 {
   return sim->mmio_fetch(paddr, len, bytes);
@@ -243,6 +271,8 @@ inline void mmu_t::perform_intrapage_load(reg_t vaddr, uintptr_t host_addr, reg_
 
   if (tracer.interested_in_range(paddr, paddr + len, LOAD))
     tracer.trace(paddr, len, LOAD);
+
+  cosim_log_load(vaddr, paddr, len);
 }
 
 void mmu_t::load_slow_path_intrapage(reg_t len, uint8_t* bytes, mem_access_info_t access_info)
@@ -316,9 +346,6 @@ void mmu_t::load_slow_path(reg_t original_addr, std::size_t len,
   if (check_triggers_load)
     check_triggers(triggers::OPERATION_LOAD,
       transformed_addr, access_info.effective_virt, len, bytes);
-
-  if (unlikely(proc->get_log_commits_enabled()))
-    proc->state.log_mem_read.push_back(std::make_tuple(original_addr, 0, len));
 }
 
 inline void mmu_t::perform_intrapage_store(reg_t vaddr, uintptr_t host_addr, reg_t paddr, reg_t len, const uint8_t* bytes, xlate_flags_t xlate_flags)
@@ -332,6 +359,8 @@ inline void mmu_t::perform_intrapage_store(reg_t vaddr, uintptr_t host_addr, reg
 
   if (tracer.interested_in_range(paddr, paddr + len, STORE))
     tracer.trace(paddr, len, STORE);
+
+  cosim_log_store(vaddr, paddr, len, bytes);
 }
 
 void mmu_t::store_slow_path_intrapage(reg_t len, const uint8_t* bytes, mem_access_info_t access_info, bool actually_store)
@@ -405,14 +434,6 @@ void mmu_t::store_slow_path(reg_t original_addr, std::size_t len,
     }
   } else {
     store_slow_path_intrapage(len, bytes, access_info, actually_store);
-  }
-
-  if (actually_store && proc && unlikely(proc->get_log_commits_enabled())) {
-    for (size_t offset = 0; offset < len; offset += sizeof(reg_t)) {
-      auto this_size = std::min(len - offset, sizeof(reg_t));
-      auto this_data = reg_from_bytes(this_size, bytes + offset);
-      proc->state.log_mem_write.push_back(std::make_tuple(original_addr + offset, this_data, this_size));
-    }
   }
 }
 

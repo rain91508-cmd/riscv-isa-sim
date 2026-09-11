@@ -101,14 +101,37 @@ public:
   mmu_t(simif_t* sim, endianness_t endianness, processor_t* proc, reg_t cache_blocksz);
   ~mmu_t();
 
+  // co-simulation memory capture (ADR-0013 D17/D18): push one entry into the
+  // per-instruction log buffers for an access that has just been performed.
+  // No-ops unless log_commits_enabled().  Defined in mmu.cc.
+  void cosim_log_load(reg_t vaddr, reg_t paddr, size_t len);
+  void cosim_log_store(reg_t vaddr, reg_t paddr, size_t len, const uint8_t* bytes);
+
+  // Diagnostics for ADR-0013 D18/plan 1.2: how many logged accesses were
+  // produced by the aligned+TLB-hit fast paths, which used to bypass the log
+  // completely.  Lets a co-simulation driver state whether a run's store
+  // coverage came from the fast path or only from the slow path.
+  uint64_t cosim_fast_loads = 0;
+  uint64_t cosim_fast_stores = 0;
+
+  // ADR-0013 D19: the exclusive monitor lives in the testbench, not in either
+  // core, so the TB injects the SC verdict.  -1 = no override (use Spike's own
+  // reservation); 0 = SC fails; 1 = SC passes.  One-shot: store_conditional()
+  // consumes and resets it.  v1 is single-core, so the driver always passes 1.
+  int cosim_sc_verdict = -1;
+
   template<typename T>
   T ALWAYS_INLINE load(reg_t addr, xlate_flags_t xlate_flags = {}) {
     target_endian<T> res;
     bool aligned = (addr & (sizeof(T) - 1)) == 0;
-    auto [tlb_hit, host_addr, _] = access_tlb(tlb_load, addr);
+    auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_load, addr);
 
     if (likely(!xlate_flags.is_special_access() && aligned && tlb_hit)) {
       res = *(target_endian<T>*)host_addr;
+      // The aligned+TLB-hit fast path used to bypass the memory log; only the
+      // slow path pushed, so a logged run silently lost these accesses.
+      ++cosim_fast_loads;
+      cosim_log_load(addr, paddr, sizeof(T));
     } else {
       load_slow_path(addr, sizeof(T), (uint8_t*)&res, xlate_flags);
     }
@@ -145,10 +168,15 @@ public:
   void ALWAYS_INLINE store(reg_t addr, T val, xlate_flags_t xlate_flags = {}) {
     MMU_OBSERVE_STORE(addr, val, sizeof(T));
     bool aligned = (addr & (sizeof(T) - 1)) == 0;
-    auto [tlb_hit, host_addr, _] = access_tlb(tlb_store, addr);
+    auto [tlb_hit, host_addr, paddr] = access_tlb(tlb_store, addr);
 
     if (!xlate_flags.is_special_access() && likely(aligned && tlb_hit)) {
-      *(target_endian<T>*)host_addr = to_target(val);
+      target_endian<T> target_val = to_target(val);
+      *(target_endian<T>*)host_addr = target_val;
+      // The aligned+TLB-hit fast path used to bypass the memory log; only the
+      // slow path pushed, so a logged run silently lost these stores.
+      ++cosim_fast_stores;
+      cosim_log_store(addr, paddr, sizeof(T), (const uint8_t*)&target_val);
     } else {
       target_endian<T> target_val = to_target(val);
       store_slow_path(addr, sizeof(T), (const uint8_t*)&target_val, xlate_flags, true, false);
@@ -278,6 +306,15 @@ public:
   bool store_conditional(reg_t addr, T val)
   {
     bool have_reservation = check_load_reservation(addr, sizeof(T));
+
+    // ADR-0013 D19: honour a TB-injected verdict instead of Spike's own
+    // reservation.  check_load_reservation() still runs first so misalignment,
+    // access-fault and PMP behaviour is untouched; only pass/fail is replaced,
+    // and it is one-shot so it cannot leak into a later SC.
+    if (unlikely(cosim_sc_verdict >= 0)) {
+      have_reservation = (cosim_sc_verdict == 1);
+      cosim_sc_verdict = -1;
+    }
 
     if (have_reservation)
       store(addr, val);

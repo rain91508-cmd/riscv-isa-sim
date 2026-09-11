@@ -118,6 +118,7 @@ void state_t::reset(processor_t* const proc, reg_t max_isa)
   last_inst_priv = 0;
   last_inst_xlen = 0;
   last_inst_flen = 0;
+  cosim = cosim_capture_t();
 
   elp = elp_t::NO_LP_EXPECTED;
 
@@ -418,6 +419,18 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
       state.pc = DEBUG_ROM_TVEC;
     }
     return;
+  }
+
+  // Capture the trap for the cosim step record (ADR-0013 D8).  Record-only:
+  // the trap delivery below is untouched.  Placed after the debug-mode early
+  // return, which does not deliver an architectural trap.
+  if (get_log_commits_enabled()) {
+    state.cosim.trap_valid = true;
+    state.cosim.trap_cause = t.cause();
+    state.cosim.trap_tval  = t.has_tval()  ? t.get_tval()  : 0;
+    state.cosim.trap_tval2 = t.has_tval2() ? t.get_tval2() : 0;
+    state.cosim.trap_tinst = t.has_tinst() ? t.get_tinst() : 0;
+    state.cosim.trap_epc   = epc;
   }
 
   // By default, trap to M-mode, unless delegated to HS-mode or VS-mode

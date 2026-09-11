@@ -17,6 +17,7 @@
 #include "triggers.h"
 #include "../fesvr/memif.h"
 #include "vector_unit.h"
+#include "cosim.h"
 
 #define FIRST_HPMCOUNTER 3
 #define N_HPMCOUNTERS 29
@@ -71,8 +72,10 @@ struct opcode_map_entry_t
 // regnum, data
 typedef std::map<reg_t, freg_t> commit_log_reg_t;
 
-// addr, value, size
-typedef std::vector<std::tuple<reg_t, uint64_t, uint8_t>> commit_log_mem_t;
+// addr, paddr, value, size -- the paddr element is the cosim addition (D17):
+// the CL compares store writes physical-address to physical-address, so the
+// log has to carry both addresses.  (vaddr, paddr, data, len)
+typedef std::vector<std::tuple<reg_t, reg_t, uint64_t, uint8_t>> commit_log_mem_t;
 
 // architectural state of a RISC-V hart
 struct state_t
@@ -220,6 +223,10 @@ struct state_t
 
   bool critical_error;
 
+  // co-simulation capture scratch (cosim.h); written only when
+  // log_commits_enabled(), read only by processor_t::cosim_step_one().
+  cosim_capture_t cosim;
+
  private:
   void csr_init(processor_t* const proc, reg_t max_isa);
 };
@@ -241,6 +248,22 @@ public:
   void set_histogram(bool value);
   void enable_log_commits();
   bool get_log_commits_enabled() const { return log_commits_enabled; }
+
+  // ---- co-simulation step API (ADR-0013) ---------------------------------
+  // Turn on the per-instruction log capture and make sure the write sets are
+  // complete (flushes the DTLB so no stale, unlogged fast-path hit survives).
+  void cosim_enable_capture();
+  // Step until exactly one architectural instruction retires (or one trap is
+  // taken), absorbing PC_SERIALIZE_BEFORE / serialize-after no-ops internally
+  // (D12), and return its structured record (D18).
+  StepRecord cosim_step_one();
+  // D19: TB-owned exclusive-monitor verdict, injected before an SC step.
+  // -1 = do not override (use Spike's own reservation), 0 = fail, 1 = pass.
+  // One-shot: consumed and cleared by the next store_conditional().
+  void cosim_set_sc_verdict(int verdict);
+  // D18/plan 1.2 diagnostics: (#loads, #stores) that were logged by the
+  // aligned+TLB-hit MMU fast paths rather than the slow path.
+  std::pair<uint64_t, uint64_t> cosim_fast_path_counts() const;
   void reset();
   void step(size_t n); // run for n cycles
   void put_csr(int which, reg_t val);

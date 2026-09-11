@@ -22,6 +22,18 @@ static void commit_log_stash_privilege(processor_t* p)
   state->last_inst_flen = p->get_flen();
 }
 
+// Record which instruction this attempt belongs to.  The text printer gets pc
+// and insn passed down from execute_insn_logged(), but the cosim record is
+// assembled after step() returns, so the identity has to be stashed here
+// alongside the privilege stash (ADR-0013 D18).
+static void commit_log_stash_insn(processor_t* p, reg_t pc, insn_t insn)
+{
+  state_t* state = p->get_state();
+  state->cosim.insn_pc   = pc;
+  state->cosim.insn_bits = (uint64_t)insn.bits();
+  state->cosim.insn_len  = (uint32_t)insn.length();
+}
+
 static void commit_log_print_value(FILE *log_file, int width, const void *data)
 {
   assert(log_file);
@@ -145,7 +157,7 @@ static void commit_log_print_insn(processor_t *p, reg_t pc, insn_t insn)
     fprintf(log_file, " mem ");
     commit_log_print_value(log_file, xlen, std::get<0>(item));
     fprintf(log_file, " ");
-    commit_log_print_value(log_file, std::get<2>(item) << 3, std::get<1>(item));
+    commit_log_print_value(log_file, std::get<3>(item) << 3, std::get<2>(item));
   }
   fprintf(log_file, "\n");
 }
@@ -166,6 +178,7 @@ static inline reg_t execute_insn_logged(processor_t* p, reg_t pc, insn_fetch_t f
   if (p->get_log_commits_enabled()) {
     commit_log_reset(p);
     commit_log_stash_privilege(p);
+    commit_log_stash_insn(p, pc, fetch.insn);
   }
 
   reg_t npc;
@@ -233,7 +246,7 @@ void processor_t::step(size_t n)
       if (unlikely(invalid_pc(pc))) { \
         switch (pc) { \
           case PC_SERIALIZE_BEFORE: state.serialized = true; break; \
-          case PC_SERIALIZE_AFTER: ++instret; break; \
+          case PC_SERIALIZE_AFTER: ++instret; ++state.cosim.retire_count; break; \
           default: abort(); \
         } \
         pc = state.pc; \
@@ -241,6 +254,7 @@ void processor_t::step(size_t n)
       } else { \
         state.pc = pc; \
         instret++; \
+        ++state.cosim.retire_count; \
       }}
 
     try

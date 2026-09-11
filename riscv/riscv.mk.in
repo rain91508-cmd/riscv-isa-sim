@@ -22,6 +22,7 @@ riscv_install_hdrs = \
 	cachesim.h \
 	cfg.h \
 	common.h \
+	cosim.h \
 	csrs.h \
 	debug_defines.h \
 	debug_module.h \
@@ -55,6 +56,7 @@ riscv_precompiled_hdrs = \
 riscv_srcs = \
 	processor.cc \
 	execute.cc \
+	cosim.cc \
 	dts.cc \
 	sim.cc \
 	interactive.cc \
