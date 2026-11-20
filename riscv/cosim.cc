@@ -55,6 +55,18 @@ StepRecord processor_t::cosim_step_one()
 
   for (size_t attempt = 0; attempt < COSIM_ABSORB_GUARD; ++attempt) {
     st->cosim.trap_valid = false;
+    st->cosim.attempt_stashed = false;
+    // P7/M1 (ADR-0013 D12 record contract): clear the write logs at the
+    // start of EVERY step attempt, so a record can never carry another
+    // step's writes.  This matters for FETCH-SIDE traps: mmu->load_insn()
+    // throws before execute_insn_logged() gets to re-reset, so without this
+    // clear the trap record would pick up the previous instruction's stale
+    // log buffers.  Execute-side traps are unaffected: their own attempt
+    // reaches execute_insn_logged(), which re-resets and then keeps the
+    // attempt's legitimate partial writes + take_trap()'s CSR writes.
+    st->log_reg_write.clear();
+    st->log_mem_read.clear();
+    st->log_mem_write.clear();
     step(1);
     if (st->cosim.retire_count != retires_before || st->cosim.trap_valid) {
       rec.absorbed = (uint32_t)attempt;
@@ -77,6 +89,21 @@ StepRecord processor_t::cosim_step_one()
   rec.prv_changed = st->prv_changed;
   rec.retire_seq = st->cosim.retire_count;
   rec.commit_no  = ++st->cosim.records;
+
+  if (rec.trapped && !st->cosim.attempt_stashed) {
+    // P7/M1 fetch-side trap: the trap fired in mmu->load_insn() BEFORE
+    // execute_insn_logged() could stash this step's identity, so the fields
+    // above still hold the PREVIOUS instruction's identity (the bug this
+    // replaces: a fetch trap reported as `pc=0x80000150 SRET`).  The record
+    // is rebuilt with the trap's own facts: pc = trap_epc, the explicit
+    // NO-ENCODING marker (insn_bits = 0, insn_len = 0 -- a fetch-side trap
+    // composite has no encoding), and priv = privilege at the fault (not the
+    // stale last_inst_priv).  Capture-only; no ISA semantics change.
+    rec.pc        = st->cosim.trap_epc;
+    rec.insn_bits = 0;
+    rec.insn_len  = 0;
+    rec.priv      = st->cosim.trap_priv;
+  }
 
   if (rec.trapped) {
     rec.cause = st->cosim.trap_cause;

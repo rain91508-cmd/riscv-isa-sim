@@ -101,6 +101,17 @@ struct cosim_capture_t {
   bool     trap_valid = false;
   uint64_t trap_cause = 0, trap_tval = 0, trap_tval2 = 0, trap_tinst = 0;
   uint64_t trap_epc   = 0;
+  // Privilege AT the fault (state.prv before take_trap() delivers the trap),
+  // captured with the trap fields.  A fetch-side trap record has no
+  // last_inst_priv of its own (the attempt never reached
+  // execute_insn_logged()), so the stale one must not be reported.
+  uint32_t trap_priv  = 0;
+  // Set by commit_log_stash_insn() when one logged instruction attempt has
+  // stashed its identity this step; cleared by cosim_step_one() at the start
+  // of EVERY step attempt.  A trap with no stashed attempt is a FETCH-SIDE
+  // trap (thrown by mmu->load_insn() before execute_insn_logged()) and gets
+  // the explicit no-encoding record (pc=trap_epc, insn=0, len=0).
+  bool     attempt_stashed = false;
   // Incremented by cosim_step_one() for each record handed to the caller.
   uint64_t records = 0;
 };

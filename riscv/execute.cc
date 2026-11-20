@@ -32,6 +32,11 @@ static void commit_log_stash_insn(processor_t* p, reg_t pc, insn_t insn)
   state->cosim.insn_pc   = pc;
   state->cosim.insn_bits = (uint64_t)insn.bits();
   state->cosim.insn_len  = (uint32_t)insn.length();
+  // This step attempt HAS an instruction identity (P7/M1): lets
+  // cosim_step_one() tell an execute-side trap (this attempt reached
+  // execute_insn_logged) from a fetch-side one (mmu->load_insn() threw
+  // before this point).
+  state->cosim.attempt_stashed = true;
 }
 
 static void commit_log_print_value(FILE *log_file, int width, const void *data)

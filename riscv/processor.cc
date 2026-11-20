@@ -431,6 +431,10 @@ void processor_t::take_trap(trap_t& t, reg_t epc)
     state.cosim.trap_tval2 = t.has_tval2() ? t.get_tval2() : 0;
     state.cosim.trap_tinst = t.has_tinst() ? t.get_tinst() : 0;
     state.cosim.trap_epc   = epc;
+    // Privilege AT the fault: state.prv is still the pre-trap privilege here
+    // (set_privilege() runs in the delivery below).  A fetch-side trap record
+    // has no stashed last_inst_priv of its own (P7/M1).
+    state.cosim.trap_priv  = (uint32_t)state.prv;
   }
 
   // By default, trap to M-mode, unless delegated to HS-mode or VS-mode
