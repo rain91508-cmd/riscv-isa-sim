@@ -355,8 +355,29 @@ void processor_t::step(size_t n)
       }
       // Trigger action takes priority over single step
       auto match = TM.detect_trap_match(t);
-      if (match.has_value())
+      if (match.has_value()) {
+        // P20 secondary-hazard guard (ADR-0013 D8/D12 identity rule): the
+        // trigger action may deliver a SECOND trap (take_trigger_action ->
+        // take_trap) whose capture would overwrite the FIRST trap's captured
+        // identity and whose trap CSR writes would overwrite the first
+        // trap's writes in the log.  The step record carries the FIRST trap,
+        // so the capture is preserved across the nested action.
+        const cosim_capture_t first_trap = state.cosim;
+        const commit_log_reg_t first_writes = state.log_reg_write;
         take_trigger_action(match->action, 0, state.pc, 0);
+        state.cosim.trap_valid = first_trap.trap_valid;
+        state.cosim.trap_cause = first_trap.trap_cause;
+        state.cosim.trap_tval  = first_trap.trap_tval;
+        state.cosim.trap_tval2 = first_trap.trap_tval2;
+        state.cosim.trap_tinst = first_trap.trap_tinst;
+        state.cosim.trap_epc   = first_trap.trap_epc;
+        state.cosim.trap_priv  = first_trap.trap_priv;
+        state.cosim.insn_pc    = first_trap.insn_pc;
+        state.cosim.insn_bits  = first_trap.insn_bits;
+        state.cosim.insn_len   = first_trap.insn_len;
+        state.cosim.attempt_stashed = first_trap.attempt_stashed;
+        state.log_reg_write    = first_writes;
+      }
       else if (unlikely(state.single_step == state.STEP_STEPPED)) {
         state.single_step = state.STEP_NONE;
         enter_debug_mode(DCSR_CAUSE_STEP, 0);
@@ -365,6 +386,14 @@ void processor_t::step(size_t n)
     catch (triggers::matched_t& t)
     {
       take_trigger_action(t.action, t.address, pc, t.gva);
+      // P20 (ADR-0013 D8/D12 "a trap ends the step"): a trigger trap ends the
+      // step attempt exactly like catch(trap_t&) -- no post-trap instruction
+      // executes in this step(1).  Without this the same step would execute
+      // the trap handler's first instruction (csrr mcause at mtvec), whose
+      // execute_insn_logged() wipes the trap's CSR writes and stashes ITS
+      // identity, fusing trap flags + handler identity + handler writes into
+      // one record (D11 absorbed-record-not-NOP).
+      n = instret;
     }
     catch(trap_debug_mode&)
     {
@@ -378,6 +407,17 @@ void processor_t::step(size_t n)
       // In the debug ROM this prevents us from wasting time looping, but also
       // allows us to switch to other threads only once per idle loop in case
       // there is activity.
+      //
+      // P22 (ADR-0013 D12 "one step = one record"): the wfi() retire throws
+      // AFTER set_pc_and_serialize, so advance_pc() never runs and the local
+      // instret bump below does not bump state.cosim.retire_count -- the wfi
+      // would get NO record and the stream would desync (si-p-wfi).  Bump the
+      // retire count here ONLY for the genuine wfi RETIRE (in_wfi still false
+      // at catch time); the WFI-re-entry no-op (thrown at the in_wfi check
+      // before any instruction executes) stays uncounted so cosim_step_one()
+      // keeps absorbing it as a non-retirement.
+      if (!in_wfi)
+        ++state.cosim.retire_count;
       n = ++instret;
       in_wfi = true;
     }

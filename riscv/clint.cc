@@ -15,6 +15,18 @@ clint_t::clint_t(const simif_t* sim, uint64_t freq_hz, bool real_time)
 
   real_time_ref_secs = base.tv_sec;
   real_time_ref_usecs = base.tv_usec;
+
+  // P19 platform ruling (timer-neutral cosim gold; ADR-0013 D6/D20
+  // Spike-config standing obligation): the DTS CLINT is present but its
+  // timer line is held inactive at bring-up -- mtimecmp starts at U64_MAX,
+  // so mip.MTIP only asserts once software programs mtimecmp.  Without
+  // this seed mtimecmp defaults to 0 and tick(0) below backdoors mip.MTIP
+  // on (mtime 0 >= mtimecmp 0), which the bare-metal TB (no timer) never
+  // clears.  mip's device-sourced pending bits (MTIP/MSIP) must reflect
+  // only software-set state.
+  for (const auto& hart : sim->get_harts())
+    mtimecmp[hart.first] = (mtimecmp_t)-1;
+
   tick(0);
 }
 
